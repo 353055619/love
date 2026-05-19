@@ -43,6 +43,66 @@ const CARD_BODY_HEIGHT: f64 = 29.0;
 const CARD_SPRITE_WIDTH: f64 = 78.0;
 const CARD_SPRITE_HEIGHT: f64 = 40.0;
 const CARD_SPRITE_RATIO: f64 = 2.0;
+const BACKGROUND_CODE_LINES: &[&str] = &[
+    "use wasm_bindgen::prelude::*;",
+    "use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};",
+    "",
+    "const CARD_TEXTS: &[&str] = &[",
+    "    \"好好爱自己\", \"天天开心\", \"一直陪你\",",
+    "    \"每天想你\", \"笑口常开\", \"有我在呢\",",
+    "];",
+    "",
+    "#[wasm_bindgen]",
+    "pub fn start() -> Result<(), JsValue> {",
+    "    console_error_panic_hook::set_once();",
+    "    let window = web_sys::window().ok_or_else(|| JsValue::from_str(\"missing window\"))?;",
+    "    let scene = Rc::new(RefCell::new(Scene::new(",
+    "        window, canvas, context, document, background_canvas, background_context,",
+    "    )));",
+    "    Scene::schedule(scene);",
+    "    Ok(())",
+    "}",
+    "",
+    "fn render(&mut self, timestamp: f64) {",
+    "    self.resize_canvas();",
+    "    let cycle = elapsed % 12.0;",
+    "    self.context.draw_image_with_html_canvas_element_and_dw_and_dh(",
+    "        &self.background_canvas, 0.0, 0.0, width, height,",
+    "    );",
+    "    for (card, sprite) in self.cards.iter().zip(&self.card_sprites) {",
+    "        let frame = card.frame(cycle, width, height);",
+    "        if should_draw_frame(&frame, width, height) {",
+    "            self.paint_card(frame, sprite);",
+    "        }",
+    "    }",
+    "}",
+    "",
+    "fn card_sprite(&self, card: &Card) -> CardSprite {",
+    "    let canvas = self.document.create_element(\"canvas\")?;",
+    "    context.set_fill_style_str(card.fill);",
+    "    rounded_rect(&context, body_x, body_y, CARD_BODY_WIDTH, CARD_BODY_HEIGHT, 5.0);",
+    "    context.fill_text(card.text, body_x + CARD_BODY_WIDTH * 0.5, body_y + 15.5);",
+    "    CardSprite { canvas }",
+    "}",
+    "",
+    "fn paint_card(&self, frame: CardFrame, sprite: &CardSprite) {",
+    "    self.context.save();",
+    "    self.context.set_global_alpha(frame.alpha);",
+    "    self.context.translate(frame.x, frame.y);",
+    "    self.context.rotate(frame.rotation);",
+    "    self.context.draw_image_with_html_canvas_element_and_dw_and_dh(",
+    "        &sprite.canvas, -w / 2.0, -h / 2.0, w, h,",
+    "    );",
+    "    self.context.restore();",
+    "}",
+    "",
+    "fn should_draw_frame(frame: &CardFrame, viewport_width: f64, viewport_height: f64) -> bool {",
+    "    if frame.alpha <= 0.01 { return false; }",
+    "    let margin = frame.width.max(frame.height) * 0.75;",
+    "    frame.x + frame.width * 0.5 + margin >= 0.0",
+    "        && frame.x - frame.width * 0.5 - margin <= viewport_width",
+    "}",
+];
 
 #[wasm_bindgen]
 pub fn start() -> Result<(), JsValue> {
@@ -292,15 +352,6 @@ impl Scene {
         context.set_font("12px 'SFMono-Regular', Menlo, Consolas, monospace");
         context.set_text_align("left");
         context.set_text_baseline("top");
-        let snippets = [
-            "fn main() {",
-            "  let love = Card::new(\"you\");",
-            "  loop {",
-            "    heart.render(&love);",
-            "  }",
-            "}",
-        ];
-
         for row in 0..32 {
             let y = 22.0 + row as f64 * 20.0;
             if y > height {
@@ -309,7 +360,11 @@ impl Scene {
             context.set_fill_style_str("rgba(155, 164, 180, 0.34)");
             let _ = context.fill_text(&(row + 1).to_string(), 18.0, y);
             context.set_fill_style_str("rgba(220, 232, 255, 0.28)");
-            let _ = context.fill_text(snippets[row % snippets.len()], 74.0, y);
+            let _ = context.fill_text(
+                BACKGROUND_CODE_LINES[row % BACKGROUND_CODE_LINES.len()],
+                74.0,
+                y,
+            );
         }
 
         context.set_fill_style_str("rgba(255, 78, 156, 0.06)");
@@ -573,6 +628,15 @@ mod tests {
         frame.alpha = 1.0;
         frame.x = -200.0;
         assert!(!should_draw_frame(&frame, 390.0, 844.0));
+    }
+
+    #[test]
+    fn background_uses_real_lib_rs_symbols() {
+        let code = BACKGROUND_CODE_LINES.join("\n");
+        assert!(code.contains("pub fn start()"));
+        assert!(code.contains("fn card_sprite(&self, card: &Card)"));
+        assert!(code.contains("fn should_draw_frame"));
+        assert!(!code.contains("Card::new(\"you\")"));
     }
 
     fn test_frame() -> CardFrame {
