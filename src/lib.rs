@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, Window};
+use web_sys::{CanvasRenderingContext2d, Document, HtmlCanvasElement, Window};
 
 const CARD_TEXTS: &[&str] = &[
     "好好爱自己",
@@ -38,6 +38,12 @@ const CARD_COLORS: &[(&str, &str)] = &[
     ("#fff3a6", "#413817"),
 ];
 
+const CARD_BODY_WIDTH: f64 = 66.0;
+const CARD_BODY_HEIGHT: f64 = 29.0;
+const CARD_SPRITE_WIDTH: f64 = 78.0;
+const CARD_SPRITE_HEIGHT: f64 = 40.0;
+const CARD_SPRITE_RATIO: f64 = 2.0;
+
 #[wasm_bindgen]
 pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
@@ -66,6 +72,7 @@ pub fn start() -> Result<(), JsValue> {
         window,
         canvas,
         context,
+        document,
         background_canvas,
         background_context,
     )));
@@ -75,11 +82,13 @@ pub fn start() -> Result<(), JsValue> {
 
 struct Scene {
     window: Window,
+    document: Document,
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
     background_canvas: HtmlCanvasElement,
     background_context: CanvasRenderingContext2d,
     cards: Vec<Card>,
+    card_sprites: Vec<CardSprite>,
     layout: CardLayout,
     start_time: f64,
     last_width: u32,
@@ -92,16 +101,19 @@ impl Scene {
         window: Window,
         canvas: HtmlCanvasElement,
         context: CanvasRenderingContext2d,
+        document: Document,
         background_canvas: HtmlCanvasElement,
         background_context: CanvasRenderingContext2d,
     ) -> Self {
         Self {
             window,
+            document,
             canvas,
             context,
             background_canvas,
             background_context,
             cards: Vec::new(),
+            card_sprites: Vec::new(),
             layout: CardLayout::new(0, 0),
             start_time: js_sys::Date::now(),
             last_width: 0,
@@ -150,9 +162,11 @@ impl Scene {
                 height,
             );
 
-        for card in &self.cards {
+        for (card, sprite) in self.cards.iter().zip(&self.card_sprites) {
             let frame = card.frame(cycle, width, height);
-            self.paint_card(frame);
+            if should_draw_frame(&frame, width, height) {
+                self.paint_card(frame, sprite);
+            }
         }
 
         self.paint_caption(width, height, cycle);
@@ -177,7 +191,10 @@ impl Scene {
         let layout = card_layout_for_width(css_width);
 
         if self.layout != layout {
-            self.cards = cards(layout);
+            let new_cards = cards(layout);
+            let new_sprites = self.card_sprites(&new_cards);
+            self.cards = new_cards;
+            self.card_sprites = new_sprites;
             self.layout = layout;
         }
 
@@ -197,6 +214,71 @@ impl Scene {
             .background_context
             .set_transform(ratio, 0.0, 0.0, ratio, 0.0, 0.0);
         Self::paint_code_editor(&self.background_context, css_width, css_height);
+    }
+
+    fn card_sprites(&self, cards: &[Card]) -> Vec<CardSprite> {
+        cards.iter().map(|card| self.card_sprite(card)).collect()
+    }
+
+    fn card_sprite(&self, card: &Card) -> CardSprite {
+        let canvas = self
+            .document
+            .create_element("canvas")
+            .expect("card sprite canvas element")
+            .dyn_into::<HtmlCanvasElement>()
+            .expect("card sprite canvas");
+        canvas.set_width((CARD_SPRITE_WIDTH * CARD_SPRITE_RATIO).round() as u32);
+        canvas.set_height((CARD_SPRITE_HEIGHT * CARD_SPRITE_RATIO).round() as u32);
+
+        let context = canvas
+            .get_context("2d")
+            .expect("card sprite context result")
+            .expect("card sprite context")
+            .dyn_into::<CanvasRenderingContext2d>()
+            .expect("2d card sprite context");
+        let _ = context.set_transform(CARD_SPRITE_RATIO, 0.0, 0.0, CARD_SPRITE_RATIO, 0.0, 0.0);
+
+        let body_x = 4.0;
+        let body_y = 2.5;
+        let shadow = 5.0;
+        context.set_fill_style_str("rgba(0, 0, 0, 0.18)");
+        rounded_rect(
+            &context,
+            body_x + shadow,
+            body_y + shadow,
+            CARD_BODY_WIDTH,
+            CARD_BODY_HEIGHT,
+            5.0,
+        );
+        context.fill();
+
+        context.set_fill_style_str(card.fill);
+        rounded_rect(
+            &context,
+            body_x,
+            body_y,
+            CARD_BODY_WIDTH,
+            CARD_BODY_HEIGHT,
+            5.0,
+        );
+        context.fill();
+
+        context.set_fill_style_str("rgba(255, 255, 255, 0.45)");
+        context.fill_rect(body_x + 5.0, body_y + 5.0, CARD_BODY_WIDTH - 10.0, 2.0);
+
+        context.set_fill_style_str(card.text_color);
+        context.set_text_align("center");
+        context.set_text_baseline("middle");
+        context.set_font(
+            "700 12px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif",
+        );
+        let _ = context.fill_text(
+            card.text,
+            body_x + CARD_BODY_WIDTH * 0.5,
+            body_y + CARD_BODY_HEIGHT * 0.5 + 1.0,
+        );
+
+        CardSprite { canvas }
     }
 
     fn paint_code_editor(context: &CanvasRenderingContext2d, width: f64, height: f64) {
@@ -244,39 +326,23 @@ impl Scene {
         context.fill();
     }
 
-    fn paint_card(&self, frame: CardFrame) {
+    fn paint_card(&self, frame: CardFrame, sprite: &CardSprite) {
         let w = frame.width;
         let h = frame.height;
-        let x = frame.x - w / 2.0;
-        let y = frame.y - h / 2.0;
-        let radius = 5.0 * frame.scale;
-        let shadow = 7.0 * frame.scale;
 
         self.context.save();
         self.context.set_global_alpha(frame.alpha);
         let _ = self.context.translate(frame.x, frame.y);
         let _ = self.context.rotate(frame.rotation);
-        let _ = self.context.translate(-frame.x, -frame.y);
-
-        self.context
-            .set_fill_style_str(&format!("rgba(0, 0, 0, {})", 0.18 * frame.alpha));
-        self.context.fill_rect(x + shadow, y + shadow, w, h);
-
-        self.context.set_fill_style_str(frame.fill);
-        rounded_rect(&self.context, x, y, w, h, radius);
-        self.context.fill();
-
-        self.context.set_fill_style_str("rgba(255, 255, 255, 0.45)");
-        self.context.fill_rect(x + 5.0, y + 5.0, w - 10.0, 2.0);
-
-        self.context.set_fill_style_str(frame.text_color);
-        self.context.set_text_align("center");
-        self.context.set_text_baseline("middle");
-        self.context.set_font(&format!(
-            "700 {}px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif",
-            (11.0 * frame.scale).clamp(8.5, 15.0)
-        ));
-        let _ = self.context.fill_text(frame.text, frame.x, frame.y + 2.0);
+        let _ = self
+            .context
+            .draw_image_with_html_canvas_element_and_dw_and_dh(
+                &sprite.canvas,
+                -w / 2.0,
+                -h / 2.0,
+                w,
+                h,
+            );
         self.context.restore();
     }
 
@@ -346,29 +412,25 @@ impl Card {
             + scatter * self.seed.sin() * 0.12;
 
         CardFrame {
-            text: self.text,
-            fill: self.fill,
-            text_color: self.text_color,
             x,
             y,
-            width: 66.0 * scale,
-            height: 29.0 * scale,
-            scale,
+            width: CARD_SPRITE_WIDTH * scale,
+            height: CARD_SPRITE_HEIGHT * scale,
             alpha,
             rotation,
         }
     }
 }
 
+struct CardSprite {
+    canvas: HtmlCanvasElement,
+}
+
 struct CardFrame {
-    text: &'static str,
-    fill: &'static str,
-    text_color: &'static str,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
-    scale: f64,
     alpha: f64,
     rotation: f64,
 }
@@ -395,6 +457,18 @@ fn card_layout_for_width(width: f64) -> CardLayout {
     } else {
         CardLayout::new(42, 5)
     }
+}
+
+fn should_draw_frame(frame: &CardFrame, viewport_width: f64, viewport_height: f64) -> bool {
+    if frame.alpha <= 0.01 {
+        return false;
+    }
+
+    let margin = frame.width.max(frame.height) * 0.75;
+    frame.x + frame.width * 0.5 + margin >= 0.0
+        && frame.x - frame.width * 0.5 - margin <= viewport_width
+        && frame.y + frame.height * 0.5 + margin >= 0.0
+        && frame.y - frame.height * 0.5 - margin <= viewport_height
 }
 
 fn cards(layout: CardLayout) -> Vec<Card> {
@@ -486,5 +560,29 @@ mod tests {
         assert_eq!(card_layout_for_width(390.0), CardLayout::new(36, 4));
         assert_eq!(card_layout_for_width(430.0), CardLayout::new(36, 4));
         assert_eq!(card_layout_for_width(431.0), CardLayout::new(42, 5));
+    }
+
+    #[test]
+    fn skips_invisible_or_offscreen_cards() {
+        let mut frame = test_frame();
+        assert!(should_draw_frame(&frame, 390.0, 844.0));
+
+        frame.alpha = 0.005;
+        assert!(!should_draw_frame(&frame, 390.0, 844.0));
+
+        frame.alpha = 1.0;
+        frame.x = -200.0;
+        assert!(!should_draw_frame(&frame, 390.0, 844.0));
+    }
+
+    fn test_frame() -> CardFrame {
+        CardFrame {
+            x: 100.0,
+            y: 100.0,
+            width: 66.0,
+            height: 29.0,
+            alpha: 1.0,
+            rotation: 0.0,
+        }
     }
 }
