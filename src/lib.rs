@@ -54,8 +54,21 @@ pub fn start() -> Result<(), JsValue> {
         .get_context("2d")?
         .ok_or_else(|| JsValue::from_str("missing 2d canvas context"))?
         .dyn_into::<CanvasRenderingContext2d>()?;
+    let background_canvas = document
+        .create_element("canvas")?
+        .dyn_into::<HtmlCanvasElement>()?;
+    let background_context = background_canvas
+        .get_context("2d")?
+        .ok_or_else(|| JsValue::from_str("missing background canvas context"))?
+        .dyn_into::<CanvasRenderingContext2d>()?;
 
-    let scene = Rc::new(RefCell::new(Scene::new(window, canvas, context)));
+    let scene = Rc::new(RefCell::new(Scene::new(
+        window,
+        canvas,
+        context,
+        background_canvas,
+        background_context,
+    )));
     Scene::schedule(scene);
     Ok(())
 }
@@ -64,22 +77,36 @@ struct Scene {
     window: Window,
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
+    background_canvas: HtmlCanvasElement,
+    background_context: CanvasRenderingContext2d,
     cards: Vec<Card>,
+    layout: CardLayout,
     start_time: f64,
     last_width: u32,
     last_height: u32,
+    render_ratio: f64,
 }
 
 impl Scene {
-    fn new(window: Window, canvas: HtmlCanvasElement, context: CanvasRenderingContext2d) -> Self {
+    fn new(
+        window: Window,
+        canvas: HtmlCanvasElement,
+        context: CanvasRenderingContext2d,
+        background_canvas: HtmlCanvasElement,
+        background_context: CanvasRenderingContext2d,
+    ) -> Self {
         Self {
             window,
             canvas,
             context,
-            cards: cards(),
+            background_canvas,
+            background_context,
+            cards: Vec::new(),
+            layout: CardLayout::new(0, 0),
             start_time: js_sys::Date::now(),
             last_width: 0,
             last_height: 0,
+            render_ratio: 1.0,
         }
     }
 
@@ -108,22 +135,23 @@ impl Scene {
     fn render(&mut self, timestamp: f64) {
         self.resize_canvas();
 
-        let ratio = self.window.device_pixel_ratio().max(1.0);
-        let width = self.canvas.width() as f64 / ratio;
-        let height = self.canvas.height() as f64 / ratio;
+        let width = self.canvas.width() as f64 / self.render_ratio;
+        let height = self.canvas.height() as f64 / self.render_ratio;
         let elapsed = ((js_sys::Date::now() - self.start_time) / 1000.0).max(timestamp / 1000.0);
         let cycle = elapsed % 12.0;
 
-        self.paint_background(width, height, cycle);
-        self.paint_code_editor(width, height);
+        let _ = self
+            .context
+            .draw_image_with_html_canvas_element_and_dw_and_dh(
+                &self.background_canvas,
+                0.0,
+                0.0,
+                width,
+                height,
+            );
 
-        let mut visible = Vec::with_capacity(self.cards.len());
         for card in &self.cards {
-            visible.push(card.frame(cycle, width, height));
-        }
-        visible.sort_by(|a, b| a.depth.total_cmp(&b.depth));
-
-        for frame in &visible {
+            let frame = card.frame(cycle, width, height);
             self.paint_card(frame);
         }
 
@@ -131,7 +159,7 @@ impl Scene {
     }
 
     fn resize_canvas(&mut self) {
-        let ratio = self.window.device_pixel_ratio().max(1.0);
+        let ratio = effective_device_pixel_ratio(self.window.device_pixel_ratio());
         let css_width = self
             .window
             .inner_width()
@@ -146,6 +174,12 @@ impl Scene {
             .unwrap_or(720.0);
         let width = (css_width * ratio).round() as u32;
         let height = (css_height * ratio).round() as u32;
+        let layout = card_layout_for_width(css_width);
+
+        if self.layout != layout {
+            self.cards = cards(layout);
+            self.layout = layout;
+        }
 
         if self.last_width == width && self.last_height == height {
             return;
@@ -153,42 +187,29 @@ impl Scene {
 
         self.canvas.set_width(width);
         self.canvas.set_height(height);
+        self.background_canvas.set_width(width);
+        self.background_canvas.set_height(height);
         self.last_width = width;
         self.last_height = height;
+        self.render_ratio = ratio;
         let _ = self.context.set_transform(ratio, 0.0, 0.0, ratio, 0.0, 0.0);
+        let _ = self
+            .background_context
+            .set_transform(ratio, 0.0, 0.0, ratio, 0.0, 0.0);
+        Self::paint_code_editor(&self.background_context, css_width, css_height);
     }
 
-    fn paint_background(&self, width: f64, height: f64, cycle: f64) {
-        self.context.set_fill_style_str("#101216");
-        self.context.fill_rect(0.0, 0.0, width, height);
+    fn paint_code_editor(context: &CanvasRenderingContext2d, width: f64, height: f64) {
+        context.set_fill_style_str("#15181f");
+        context.fill_rect(0.0, 0.0, width, height);
+        context.set_fill_style_str("#0f1117");
+        context.fill_rect(0.0, 0.0, 56.0, height);
+        context.set_fill_style_str("rgba(255, 255, 255, 0.05)");
+        context.fill_rect(56.0, 0.0, 1.0, height);
 
-        let glow = 180.0 + 20.0 * (cycle * 1.5).sin();
-        self.context.set_fill_style_str("rgba(255, 78, 156, 0.10)");
-        self.context.begin_path();
-        let _ = self.context.ellipse(
-            width * 0.52,
-            height * 0.45,
-            glow * 1.5,
-            glow,
-            0.0,
-            0.0,
-            PI * 2.0,
-        );
-        self.context.fill();
-    }
-
-    fn paint_code_editor(&self, width: f64, height: f64) {
-        self.context.set_fill_style_str("#15181f");
-        self.context.fill_rect(0.0, 0.0, width, height);
-        self.context.set_fill_style_str("#0f1117");
-        self.context.fill_rect(0.0, 0.0, 56.0, height);
-        self.context.set_fill_style_str("rgba(255, 255, 255, 0.05)");
-        self.context.fill_rect(56.0, 0.0, 1.0, height);
-
-        self.context
-            .set_font("12px 'SFMono-Regular', Menlo, Consolas, monospace");
-        self.context.set_text_align("left");
-        self.context.set_text_baseline("top");
+        context.set_font("12px 'SFMono-Regular', Menlo, Consolas, monospace");
+        context.set_text_align("left");
+        context.set_text_baseline("top");
         let snippets = [
             "fn main() {",
             "  let love = Card::new(\"you\");",
@@ -203,16 +224,27 @@ impl Scene {
             if y > height {
                 break;
             }
-            self.context.set_fill_style_str("rgba(155, 164, 180, 0.34)");
-            let _ = self.context.fill_text(&(row + 1).to_string(), 18.0, y);
-            self.context.set_fill_style_str("rgba(220, 232, 255, 0.28)");
-            let _ = self
-                .context
-                .fill_text(snippets[row % snippets.len()], 74.0, y);
+            context.set_fill_style_str("rgba(155, 164, 180, 0.34)");
+            let _ = context.fill_text(&(row + 1).to_string(), 18.0, y);
+            context.set_fill_style_str("rgba(220, 232, 255, 0.28)");
+            let _ = context.fill_text(snippets[row % snippets.len()], 74.0, y);
         }
+
+        context.set_fill_style_str("rgba(255, 78, 156, 0.06)");
+        context.begin_path();
+        let _ = context.ellipse(
+            width * 0.54,
+            height * 0.45,
+            width.min(height) * 0.42,
+            width.min(height) * 0.28,
+            0.0,
+            0.0,
+            PI * 2.0,
+        );
+        context.fill();
     }
 
-    fn paint_card(&self, frame: &CardFrame) {
+    fn paint_card(&self, frame: CardFrame) {
         let w = frame.width;
         let h = frame.height;
         let x = frame.x - w / 2.0;
@@ -227,17 +259,15 @@ impl Scene {
         let _ = self.context.translate(-frame.x, -frame.y);
 
         self.context
-            .set_fill_style_str(&format!("rgba(0, 0, 0, {})", 0.22 * frame.alpha));
-        rounded_rect(&self.context, x + shadow, y + shadow, w, h, radius);
-        self.context.fill();
+            .set_fill_style_str(&format!("rgba(0, 0, 0, {})", 0.18 * frame.alpha));
+        self.context.fill_rect(x + shadow, y + shadow, w, h);
 
         self.context.set_fill_style_str(frame.fill);
         rounded_rect(&self.context, x, y, w, h, radius);
         self.context.fill();
 
         self.context.set_fill_style_str("rgba(255, 255, 255, 0.45)");
-        rounded_rect(&self.context, x + 5.0, y + 5.0, w - 10.0, 3.0, 1.5);
-        self.context.fill();
+        self.context.fill_rect(x + 5.0, y + 5.0, w - 10.0, 2.0);
 
         self.context.set_fill_style_str(frame.text_color);
         self.context.set_text_align("center");
@@ -324,7 +354,6 @@ impl Card {
             width: 66.0 * scale,
             height: 29.0 * scale,
             scale,
-            depth,
             alpha,
             rotation,
         }
@@ -340,15 +369,38 @@ struct CardFrame {
     width: f64,
     height: f64,
     scale: f64,
-    depth: f64,
     alpha: f64,
     rotation: f64,
 }
 
-fn cards() -> Vec<Card> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CardLayout {
+    per_layer: usize,
+    layers: usize,
+}
+
+impl CardLayout {
+    const fn new(per_layer: usize, layers: usize) -> Self {
+        Self { per_layer, layers }
+    }
+}
+
+fn effective_device_pixel_ratio(ratio: f64) -> f64 {
+    ratio.clamp(1.0, 2.0)
+}
+
+fn card_layout_for_width(width: f64) -> CardLayout {
+    if width <= 430.0 {
+        CardLayout::new(36, 4)
+    } else {
+        CardLayout::new(42, 5)
+    }
+}
+
+fn cards(layout: CardLayout) -> Vec<Card> {
     let mut cards = Vec::new();
-    let per_layer = 42;
-    let layers = 5;
+    let per_layer = layout.per_layer;
+    let layers = layout.layers;
     let total = per_layer * layers;
 
     for layer in 0..layers {
@@ -384,7 +436,11 @@ fn cards() -> Vec<Card> {
         }
     }
 
-    cards.sort_by(|a, b| a.order.total_cmp(&b.order));
+    cards.sort_by(|a, b| {
+        a.heart_depth
+            .total_cmp(&b.heart_depth)
+            .then_with(|| a.order.total_cmp(&b.order))
+    });
     cards
 }
 
@@ -412,4 +468,23 @@ fn lerp(start: f64, end: f64, amount: f64) -> f64 {
 
 fn wave(seed: usize, amount: f64) -> f64 {
     ((seed as f64 * 12.9898).sin() * 43758.5453).fract() * amount
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caps_high_device_pixel_ratio_for_mobile_performance() {
+        assert_eq!(effective_device_pixel_ratio(0.5), 1.0);
+        assert_eq!(effective_device_pixel_ratio(1.5), 1.5);
+        assert_eq!(effective_device_pixel_ratio(3.0), 2.0);
+    }
+
+    #[test]
+    fn uses_fewer_cards_on_narrow_mobile_viewports() {
+        assert_eq!(card_layout_for_width(390.0), CardLayout::new(36, 4));
+        assert_eq!(card_layout_for_width(430.0), CardLayout::new(36, 4));
+        assert_eq!(card_layout_for_width(431.0), CardLayout::new(42, 5));
+    }
 }
