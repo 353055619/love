@@ -1,6 +1,6 @@
 # Love
 
-A small Rust/WebAssembly heart animation that opens as a static web page.
+A small Rust/WebAssembly card-heart animation that opens as a static web page.
 
 ## Requirements
 
