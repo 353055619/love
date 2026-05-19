@@ -1,0 +1,4 @@
+/target/
+/dist/
+/web/pkg/
+.DS_Store
